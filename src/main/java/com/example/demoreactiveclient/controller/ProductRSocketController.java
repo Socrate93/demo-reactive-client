@@ -1,6 +1,7 @@
 package com.example.demoreactiveclient.controller;
 
 import io.rsocket.core.Resume;
+import io.rsocket.frame.decoder.PayloadDecoder;
 import lombok.Data;
 import org.springframework.http.MediaType;
 import org.springframework.messaging.rsocket.RSocketRequester;
@@ -13,13 +14,11 @@ import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
 
 import java.time.Duration;
-import java.util.Collection;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import static io.rsocket.frame.decoder.PayloadDecoder.*;
 import static java.util.stream.Collectors.toSet;
 
 @RestController
@@ -38,6 +37,7 @@ public class ProductRSocketController {
     rSocketRequester = builder
             .rsocketConnector(connector -> connector.resume(resume)
                     .reconnect(Retry.fixedDelay(Integer.MAX_VALUE, Duration.ofSeconds(1)))
+                    .payloadDecoder(ZERO_COPY)
             )
             .tcp("localhost", 8000)
     ;
@@ -46,8 +46,8 @@ public class ProductRSocketController {
   @GetMapping(value = "/products", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
   public Flux<Product> getProducts() {
     long start = System.currentTimeMillis();
-    return getProductFlux()
-            .flatMap(this::fetchRelated)
+    return this.fetchRelated(getProductFlux())
+            //.flatMap(this::fetchRelated)
             //.collectList()
             //.flatMapMany(this::fetchRelated)
             .doOnComplete(() -> System.out.println("Rsocket : " + (System.currentTimeMillis() - start)));
@@ -75,16 +75,16 @@ public class ProductRSocketController {
   }
 
   // V2
-  private Flux<Product> fetchRelated(List<Product> products) {
-    Map<String, Product> mappedProducts = products.stream().collect(Collectors.toMap(Product::getId, Function.identity()));
+  private Flux<Product> fetchRelated(Flux<Product> products) {
+    Map<String, Product> mappedProducts = new HashMap<>();
     return rSocketRequester.route("products.related.batch")
-            .data(products.stream().map(Product::getId).collect(toSet()))
+            .data(products.doOnNext(product -> mappedProducts.putIfAbsent(product.getId(), product)).map(Product::getId))
             .retrieveFlux(ProductWithRelated.class)
             .map(productWithRelated -> new Product(productWithRelated.getId(),
                     mappedProducts.get(productWithRelated.getId()).getName(), productWithRelated.getProducts()))
-            //.flatMap(this::fetchStockOfRelated)
-            .collectList()
-            .flatMapMany(this::fetchStockOfRelated)
+            .flatMap(this::fetchStockOfRelated)
+            //.collectList()
+            //.flatMapMany(this::fetchStockOfRelated)
             ;
   }
 
@@ -95,7 +95,7 @@ public class ProductRSocketController {
     Map<String, Product> mappedProducts = product.getRelated().stream().collect(Collectors.toMap(Product::getId, Function.identity()));
     Set<String> ids = product.getRelated().stream().map(Product::getId).collect(toSet());
     return rSocketRequester.route("products.stock.batch")
-            .data(ids)
+            .data(Flux.fromIterable(ids))
             .retrieveFlux(ProductWithStock.class)
             .filter(productWithStock -> productWithStock.getStock() > 0)
             .map(productWithStock -> new Product(productWithStock.getId(),

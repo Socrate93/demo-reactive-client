@@ -2,6 +2,7 @@ package com.example.demoreactiveclient.controller;
 
 import lombok.Data;
 import org.reactivestreams.Publisher;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.util.CollectionUtils;
@@ -23,6 +24,8 @@ import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 
 @RestController
@@ -64,11 +67,29 @@ public class ProductRestController {
   @GetMapping(value = "/products", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
   public Flux<Product> getProducts() {
     long start = System.currentTimeMillis();
-    return getProductFlux()
-            //.flatMap(this::fetchRelated)
-            .collectList()
-            .flatMapMany(this::fetchRelated)
-            .doOnComplete(() -> System.out.println("Reactive : " + (System.currentTimeMillis() - start)));
+    Flux<Product> productsFlux = getProductFlux().cache();
+    Flux<ProductWithRelated> productsWithRelatedFlux = fetchRelated(productsFlux).cache();
+    return Mono.zip(productsFlux.collectList(), productsWithRelatedFlux.collectList(),
+            filterAvailable(productsWithRelatedFlux).collectList())
+            .map(tuple -> {
+              Map<String, List<String>> mappedRelated = tuple.getT2()
+                      .stream()
+                      .collect(toMap(ProductWithRelated::getId, ProductWithRelated::getProducts));
+              Map<String, Product> mappedProducts = tuple.getT3()
+                      .stream()
+                      .collect(toMap(Product::getId, identity(), (p1, p2) -> p1));
+              return tuple.getT1()
+                      .stream()
+                      .map(product -> new Product(product.getId(), product.getName(),
+                              mappedRelated.getOrDefault(product.getId(), List.of())
+                                      .stream()
+                                      .map(mappedProducts::get)
+                                      .collect(Collectors.toList())
+                      ))
+                      .collect(Collectors.toList());
+            })
+            .flatMapIterable(identity())
+            .doOnComplete(() -> System.out.println("Reactive HTTP : " + (System.currentTimeMillis() - start)));
   }
 
   private Flux<Product> getProductFlux() {
@@ -78,88 +99,43 @@ public class ProductRestController {
             .bodyToFlux(Product.class);
   }
 
-  private Mono<Product> fetchRelated(Product product) {
-    return relatedWebClient.get()
-            .uri("/products/"+product.getId()+"/related")
-            .retrieve()
-            .bodyToFlux(Product.class)
-            .filterWhen(this::fetchStock)
-            .collectList()
-            .map(related -> new Product(product.getId(), product.getName(), related));
-  }
-
-  private Mono<Boolean> fetchStock(Product product) {
-    return stockWebClient.get()
-            .uri("/products/"+product.getId()+"/stocks")
-            .retrieve()
-            .bodyToMono(Integer.class)
-            .map(stock -> stock > 0);
-  }
-
   // V2
-  private Flux<Product> fetchRelated(List<Product> products) {
-    Map<String, Product> mappedProducts = products.stream().collect(Collectors.toMap(Product::getId, Function.identity()));
-    return relatedWebClient.get()
-            .uri(uriBuilder -> uriBuilder
-                    .path("/products/related")
-                    .queryParam("ids", products.stream().map(Product::getId).collect(toSet()))
-                    .build())
+  private Flux<ProductWithRelated> fetchRelated(Flux<Product> products) {
+    return relatedWebClient.post()
+            .uri("/products/related/searches")
+            .body(products.map(Product::getId).collectList(), new ParameterizedTypeReference<Object>() {})
             .retrieve()
             .bodyToFlux(ProductWithRelated.class)
-            .map(productWithRelated -> new Product(productWithRelated.getId(),
-                    mappedProducts.get(productWithRelated.getId()).getName(), productWithRelated.getProducts()))
-            //.flatMap(this::fetchStockOfRelated)
-            .collectList()
-            .flatMapMany(this::fetchStockOfRelated)
             ;
   }
 
-  private Mono<Product> fetchStockOfRelated(Product product) {
-    if (CollectionUtils.isEmpty(product.getRelated())) {
-      return Mono.just(product);
-    }
-    Map<String, Product> mappedProducts = product.getRelated().stream().collect(Collectors.toMap(Product::getId, Function.identity()));
-    return stockWebClient.get()
-            .uri(uriBuilder -> uriBuilder
-                    .path("/products/stocks")
-                    .queryParam("ids", product.getRelated().stream().map(Product::getId).collect(toSet()))
-                    .build()
-            )
-            .retrieve()
-            .bodyToFlux(ProductWithStock.class)
-            .filter(productWithStock -> productWithStock.getStock() > 0)
-            .map(productWithStock -> new Product(productWithStock.getId(),
-                    mappedProducts.get(productWithStock.getId()).getName(), null))
-            .collectList()
-            .map(related -> new Product(product.getId(), product.getName(), related));
+  private Flux<Product> filterAvailable(Flux<ProductWithRelated> products) {
+    return fetchProductsByIds(filterPositiveStocksByIds(products
+            .flatMapIterable(product -> product.getProducts())));
   }
 
-  private Flux<Product> fetchStockOfRelated(List<Product> products) {
-    Set<String> ids = products.stream().map(Product::getRelated).flatMap(Collection::stream).map(Product::getId).collect(Collectors.toSet());
+  private Flux<Product> fetchProductsByIds(Flux<String> ids) {
+    return webClient.post()
+            .uri("/products/searches")
+            .body(ids.collectList(), new ParameterizedTypeReference<Object>() {})
+            .retrieve()
+            .bodyToFlux(Product.class);
+  }
 
-    return stockWebClient.get()
-            .uri(uriBuilder -> uriBuilder
-                    .path("/products/stocks")
-                    .queryParam("ids", ids)
-                    .build()
-            )
+  private Flux<String> filterPositiveStocksByIds(Flux<String> ids) {
+    return stockWebClient.post()
+            .uri("/products/stocks/searches")
+            .body(ids.collectList(), new ParameterizedTypeReference<Object>() {})
             .retrieve()
             .bodyToFlux(ProductWithStock.class)
             .filter(productWithStock -> productWithStock.getStock() > 0)
-            .collectList()
-            .map(list -> list.stream().filter(productWithStock -> productWithStock.getStock() > 0)
-                    .collect(Collectors.toMap(ProductWithStock::getId, ProductWithStock::getStock)))
-            .flatMapIterable(map -> products.stream()
-                    .map(product -> new Product(product.getId(), product.getName(),
-                            product.getRelated().stream().filter(related -> map.containsKey(related.getId())).collect(Collectors.toList())))
-                    .collect(Collectors.toList()))
-            ;
+            .map(ProductWithStock::getId);
   }
 
   @Data
   private static class ProductWithRelated {
     private String id;
-    private List<Product> products;
+    private List<String> products;
   }
 
   @Data

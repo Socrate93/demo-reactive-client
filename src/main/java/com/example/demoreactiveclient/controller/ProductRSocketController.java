@@ -83,6 +83,7 @@ public class ProductRSocketController {
                       ));
             })
             //.log(null, Level.INFO, ON_SUBSCRIBE, ON_COMPLETE)
+            .doOnError(e -> e.printStackTrace())
             .doOnComplete(() -> {
               var time = System.currentTimeMillis() - start;
               System.out.println("{" + currentRequesterIndex + "} Rsocket : " + time + "-- " + stats);
@@ -105,7 +106,7 @@ public class ProductRSocketController {
                         .reconnect(Retry.fixedDelay(Integer.MAX_VALUE, Duration.ofSeconds(1)))
                         .payloadDecoder(ZERO_COPY)
                 )
-                .tcp("localhost", 8000));
+                .tcp("192.168.1.29", 8000));
         requestersLatency.put(NB_REQUESTERS - 1, 0L);
         stats.put(NB_REQUESTERS - 1, new AtomicInteger(0));
         return NB_REQUESTERS - 1;

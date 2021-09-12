@@ -52,15 +52,15 @@ public class ProductRestController {
 
     this.webClient = WebClient.builder()
             .clientConnector(new ReactorClientHttpConnector(nettyHttpClient))
-            .baseUrl("http://localhost:9000")
+            .baseUrl("http://192.168.1.29:9000")
             .build();
     this.stockWebClient = WebClient.builder()
             .clientConnector(new ReactorClientHttpConnector(nettyHttpClient))
-            .baseUrl("http://localhost:9000")
+            .baseUrl("http://192.168.1.29:9000")
             .build();
     this.relatedWebClient = WebClient.builder()
             .clientConnector(new ReactorClientHttpConnector(nettyHttpClient))
-            .baseUrl("http://localhost:9000")
+            .baseUrl("http://192.168.1.29:9000")
             .build();
   }
 
